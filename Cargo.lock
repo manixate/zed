@@ -4680,6 +4680,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "d2_render"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "smol",
+ "which 6.0.3",
+]
+
+[[package]]
 name = "dap"
 version = "0.1.0"
 dependencies = [
@@ -10818,6 +10827,7 @@ dependencies = [
  "assets",
  "base64 0.22.1",
  "collections",
+ "d2_render",
  "env_logger 0.11.8",
  "fs",
  "futures 0.3.32",

@@ -1,16 +1,19 @@
 use collections::HashMap;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Entity, ImageSource,
-    ParsedSvg, RenderImage, SMOOTH_SVG_SCALE_FACTOR, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-    Size, Stateful, StyledText, Task, Window, img, pulsating_between, size,
+    Animation, AnimationExt, AnyElement, App, Context, Entity, ImageSource, ParsedSvg, RenderImage,
+    SMOOTH_SVG_SCALE_FACTOR, ScrollDelta, ScrollHandle, ScrollWheelEvent, Size, Stateful, Task,
+    Window, img, pulsating_between, size,
 };
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use ui::{CopyButton, ScrollAxes, Scrollbars, TintColor, Tooltip, WithScrollbar, prelude::*};
+use ui::{ScrollAxes, Scrollbars, Tooltip, WithScrollbar, prelude::*};
 
+use crate::diagram::{
+    render_diagram_code_view, render_diagram_copy_button, render_diagram_tab_header,
+};
 use crate::parser::{CodeBlockKind, MarkdownEvent, MarkdownTag};
 use settings::Settings as _;
 use theme_settings::ThemeSettings;
@@ -593,7 +596,7 @@ pub(crate) fn render_mermaid_diagram(
     match render_result {
         Some(Ok(render_image)) => {
             let body = if showing_code {
-                render_mermaid_code_view(&parsed.contents.contents)
+                render_diagram_code_view(&parsed.contents.contents)
             } else {
                 let rasterized_scale = cached.map_or(1.0, |cached| cached.rasterized_scale);
                 let image_element =
@@ -618,10 +621,11 @@ pub(crate) fn render_mermaid_diagram(
 
             container
                 .when(show_interactive, |container| {
-                    container.child(render_mermaid_tab_header(
+                    container.child(render_diagram_tab_header(
                         source_offset,
                         showing_code,
                         markdown.clone(),
+                        Markdown::set_mermaid_showing_code,
                     ))
                 })
                 .child(body)
@@ -639,7 +643,7 @@ pub(crate) fn render_mermaid_diagram(
         Some(Err(_)) => {
             // Render failed — show the source code without tabs
             container
-                .child(render_mermaid_code_view(&parsed.contents.contents))
+                .child(render_diagram_code_view(&parsed.contents.contents))
                 .when(show_interactive, |container| {
                     container.child(render_mermaid_overlay_controls(
                         source_offset,
@@ -691,10 +695,11 @@ pub(crate) fn render_mermaid_diagram(
                 );
                 container
                     .when(show_interactive, |container| {
-                        container.child(render_mermaid_tab_header(
+                        container.child(render_diagram_tab_header(
                             source_offset,
                             showing_code,
                             markdown.clone(),
+                            Markdown::set_mermaid_showing_code,
                         ))
                     })
                     .child(body)
@@ -711,7 +716,7 @@ pub(crate) fn render_mermaid_diagram(
             } else {
                 // No fallback — show the code so the user has something to look at
                 container
-                    .child(render_mermaid_code_view(&parsed.contents.contents))
+                    .child(render_diagram_code_view(&parsed.contents.contents))
                     .child(
                         div().absolute().top_1().right_2().child(
                             Label::new("Rendering...")
@@ -798,58 +803,6 @@ fn with_mermaid_horizontal_scrollbar(
         .into_any_element()
 }
 
-fn render_mermaid_tab_header(
-    source_offset: usize,
-    showing_code: bool,
-    markdown: Entity<Markdown>,
-) -> impl IntoElement {
-    let preview_id = ElementId::NamedChild(
-        Arc::new(ElementId::from((
-            "mermaid-tab-preview",
-            markdown.entity_id(),
-        ))),
-        source_offset.to_string().into(),
-    );
-    let code_id = ElementId::NamedChild(
-        Arc::new(ElementId::from(("mermaid-tab-code", markdown.entity_id()))),
-        source_offset.to_string().into(),
-    );
-    let preview_markdown = markdown.clone();
-    let code_markdown = markdown;
-
-    h_flex()
-        .gap_0p5()
-        .mb_2p5()
-        .child(
-            Button::new(preview_id, "Preview")
-                .label_size(LabelSize::Small)
-                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                .toggle_state(!showing_code)
-                .on_click(move |_event, _window, cx| {
-                    preview_markdown.update(cx, |md, cx| {
-                        if md.is_mermaid_showing_code(source_offset) {
-                            md.toggle_mermaid_tab(source_offset);
-                            cx.notify();
-                        }
-                    });
-                }),
-        )
-        .child(
-            Button::new(code_id, "Code")
-                .label_size(LabelSize::Small)
-                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                .toggle_state(showing_code)
-                .on_click(move |_event, _window, cx| {
-                    code_markdown.update(cx, |md, cx| {
-                        if !md.is_mermaid_showing_code(source_offset) {
-                            md.toggle_mermaid_tab(source_offset);
-                            cx.notify();
-                        }
-                    });
-                }),
-        )
-}
-
 /// The overlay controls anchored to the top-right corner of a diagram: an
 /// optional "Zoom NNN%" readout with a reset button (shown only while zoomed
 /// away from the natural size) followed by the hover-revealed copy button.
@@ -873,7 +826,13 @@ fn render_mermaid_overlay_controls(
                 on_zoom,
             ))
         })
-        .child(render_mermaid_copy_button(source_offset, code, markdown))
+        .child(render_diagram_copy_button(
+            "copy-mermaid-code",
+            source_offset,
+            code,
+            markdown,
+            CopyButtonVisibility::VisibleOnHover,
+        ))
 }
 
 /// A "Zoom NNN%" readout paired with a reset button, styled like the adjacent
@@ -913,47 +872,6 @@ fn render_mermaid_zoom_indicator(
                 }
             }),
         )
-}
-
-fn render_mermaid_copy_button(
-    source_offset: usize,
-    code: String,
-    markdown: Entity<Markdown>,
-) -> impl IntoElement {
-    let id = ElementId::NamedChild(
-        Arc::new(ElementId::from(("copy-mermaid-code", markdown.entity_id()))),
-        source_offset.to_string().into(),
-    );
-
-    CopyButton::new(id.clone(), code.clone())
-        .visible_on_hover("code_block")
-        .custom_on_click({
-            move |_window, cx| {
-                let id = id.clone();
-                markdown.update(cx, |this, cx| {
-                    this.copied_code_blocks.insert(id.clone());
-                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(Duration::from_secs(2)).await;
-                        cx.update(|cx| {
-                            this.update(cx, |this, cx| {
-                                this.copied_code_blocks.remove(&id);
-                                cx.notify();
-                            })
-                        })
-                        .ok();
-                    })
-                    .detach();
-                });
-            }
-        })
-}
-
-fn render_mermaid_code_view(contents: &SharedString) -> AnyElement {
-    div()
-        .w_full()
-        .child(StyledText::new(contents.clone()))
-        .into_any_element()
 }
 
 #[cfg(test)]

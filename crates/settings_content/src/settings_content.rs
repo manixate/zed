@@ -1211,6 +1211,25 @@ pub struct MarkdownPreviewSettingsContent {
     ///
     /// Default: 800
     pub max_width: Option<f32>,
+    /// Configuration for rendering D2 diagrams.
+    pub d2: Option<D2SettingsContent>,
+}
+
+/// The settings for rendering D2 diagrams in the markdown preview.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct D2SettingsContent {
+    /// The path to a `d2` binary to render diagrams with. When unset, `d2` is
+    /// looked up on PATH. Diagrams are left as code blocks when neither is
+    /// found; Zed never installs `d2` itself.
+    ///
+    /// Default: null
+    pub path: Option<String>,
+    /// The arguments to pass to the `d2` binary. Zed appends the arguments that
+    /// make `d2` read the diagram from stdin and write SVG to stdout.
+    ///
+    /// Default: []
+    pub arguments: Option<Vec<String>>,
 }
 
 /// The settings for the image viewer.

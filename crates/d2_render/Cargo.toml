@@ -1,0 +1,18 @@
+[package]
+name = "d2_render"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/d2_render.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+smol.workspace = true
+which.workspace = true

@@ -125,6 +125,16 @@
     // The maximum width, in pixels, of the rendered markdown content when
     // limit_content_width is enabled.
     "max_width": 800,
+    // Configuration for rendering D2 diagrams.
+    "d2": {
+      // The path to a `d2` binary to render diagrams with. When unset, `d2`
+      // is looked up on PATH. Diagrams are left as code blocks when neither
+      // is found; Zed never installs `d2` itself.
+      "path": null,
+      // The arguments to pass to the `d2` binary. Zed appends the arguments
+      // that make `d2` read the diagram from stdin and write SVG to stdout.
+      "arguments": [],
+    },
   },
   // Determines the modifier to be used to add multiple cursors with the mouse. The open hover link mouse gestures will adapt such that it do not conflict with the multicursor modifier.
   //

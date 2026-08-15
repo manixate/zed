@@ -1,3 +1,5 @@
+mod d2;
+mod diagram;
 pub mod html;
 mod mermaid;
 pub mod parser;
@@ -11,6 +13,7 @@ use gpui::HitboxBehavior;
 use gpui::UnderlineStyle;
 use language::LanguageName;
 
+use d2::{D2State, ParsedMarkdownD2Diagram, extract_d2_diagrams, render_d2_diagram};
 use log::Level;
 use mermaid::{
     MermaidState, ParsedMarkdownMermaidDiagram, extract_mermaid_diagrams, render_mermaid_diagram,
@@ -445,6 +448,13 @@ impl Default for MermaidViewState {
     }
 }
 
+/// Per-diagram view state, keyed by source offset in [`Markdown::d2_views`].
+#[derive(Default)]
+struct D2ViewState {
+    /// Whether the source code is shown instead of the rendered diagram.
+    showing_code: bool,
+}
+
 pub struct Markdown {
     source: SharedString,
     selection: Selection,
@@ -470,6 +480,14 @@ pub struct Markdown {
     /// contents. All entries are retained against the parsed diagrams on each
     /// reparse, so a single map keeps that bookkeeping in one place.
     mermaid_views: HashMap<usize, MermaidViewState>,
+    d2_state: D2State,
+    /// Supplies the Node used to render D2 diagrams. Rendering is skipped when
+    /// absent, so the diagram falls back to its source.
+    _d2_theme_subscription: Option<Subscription>,
+    _d2_settings_subscription: Option<Subscription>,
+    /// Per-diagram view state, keyed by source offset. Distinct from [`D2State`],
+    /// which caches the rendered diagrams themselves keyed by contents.
+    d2_views: HashMap<usize, D2ViewState>,
     copied_code_blocks: HashSet<ElementId>,
     wrapped_code_blocks: HashSet<usize>,
     code_block_scroll_handles: BTreeMap<usize, ScrollHandle>,
@@ -485,6 +503,7 @@ pub struct MarkdownOptions {
     pub parse_links_only: bool,
     pub parse_html: bool,
     pub render_mermaid_diagrams: bool,
+    pub render_d2_diagrams: bool,
     pub parse_heading_slugs: bool,
     pub render_metadata_blocks: bool,
 }
@@ -645,6 +664,26 @@ impl Markdown {
         } else {
             None
         };
+        let d2_theme_subscription = if options.render_d2_diagrams {
+            Some(
+                cx.observe_global::<theme::GlobalTheme>(|this: &mut Self, cx| {
+                    this.invalidate_d2_cache(cx);
+                }),
+            )
+        } else {
+            None
+        };
+        let d2_settings_subscription = if options.render_d2_diagrams {
+            Some(
+                cx.observe_global::<settings::SettingsStore>(|this: &mut Self, cx| {
+                    if this.d2_state.settings_are_stale(cx) {
+                        this.invalidate_d2_cache(cx);
+                    }
+                }),
+            )
+        } else {
+            None
+        };
         let mut this = Self {
             source,
             selection: Selection::default(),
@@ -665,6 +704,10 @@ impl Markdown {
             mermaid_state: MermaidState::default(),
             _mermaid_theme_subscription: theme_subscription,
             mermaid_views: HashMap::default(),
+            d2_state: D2State::default(),
+            _d2_theme_subscription: d2_theme_subscription,
+            _d2_settings_subscription: d2_settings_subscription,
+            d2_views: HashMap::default(),
             copied_code_blocks: HashSet::default(),
             wrapped_code_blocks: HashSet::default(),
             code_block_scroll_handles: BTreeMap::default(),
@@ -741,9 +784,11 @@ impl Markdown {
             .is_some_and(|view| view.showing_code)
     }
 
-    pub(crate) fn toggle_mermaid_tab(&mut self, source_offset: usize) {
-        let view = self.mermaid_views.entry(source_offset).or_default();
-        view.showing_code = !view.showing_code;
+    pub(crate) fn set_mermaid_showing_code(&mut self, source_offset: usize, showing_code: bool) {
+        self.mermaid_views
+            .entry(source_offset)
+            .or_default()
+            .showing_code = showing_code;
     }
 
     pub(crate) fn mermaid_zoom_level(&self, source_offset: usize) -> f32 {
@@ -874,6 +919,27 @@ impl Markdown {
         let zoom = self.mermaid_zoom_level(source_offset);
         self.mermaid_state.rerasterize_diagram(&contents, zoom, cx);
         cx.notify();
+    }
+
+    pub fn invalidate_d2_cache(&mut self, cx: &mut Context<Self>) {
+        if !self.options.render_d2_diagrams || self.parsed_markdown.d2_diagrams.is_empty() {
+            return;
+        }
+
+        self.d2_state.clear(cx);
+        let parsed_markdown = self.parsed_markdown.clone();
+        self.d2_state.update(&parsed_markdown, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn is_d2_showing_code(&self, source_offset: usize) -> bool {
+        self.d2_views
+            .get(&source_offset)
+            .is_some_and(|view| view.showing_code)
+    }
+
+    pub(crate) fn set_d2_showing_code(&mut self, source_offset: usize, showing_code: bool) {
+        self.d2_views.entry(source_offset).or_default().showing_code = showing_code;
     }
 
     fn clear_code_block_scroll_handles(&mut self) {
@@ -1179,6 +1245,8 @@ impl Markdown {
             self.active_root_block = None;
             self.images_by_source_offset.clear();
             self.mermaid_state.clear(cx);
+            self.d2_state.clear(cx);
+            self.d2_views.clear();
             cx.notify();
             cx.refresh_windows();
             return;
@@ -1197,6 +1265,7 @@ impl Markdown {
         let should_parse_links_only = self.options.parse_links_only;
         let should_parse_html = self.options.parse_html;
         let should_render_mermaid_diagrams = self.options.render_mermaid_diagrams;
+        let should_render_d2_diagrams = self.options.render_d2_diagrams;
         let should_parse_heading_slugs = self.options.parse_heading_slugs;
         let should_parse_metadata_blocks = self.options.render_metadata_blocks;
         let language_registry = self.language_registry.clone();
@@ -1214,6 +1283,7 @@ impl Markdown {
                         html_blocks: BTreeMap::default(),
                         metadata_blocks: BTreeMap::default(),
                         mermaid_diagrams: BTreeMap::default(),
+                        d2_diagrams: BTreeMap::default(),
                         heading_slugs: HashMap::default(),
                         footnote_definitions: HashMap::default(),
                     },
@@ -1237,6 +1307,11 @@ impl Markdown {
             let footnote_definitions = parsed.footnote_definitions;
             let mermaid_diagrams = if should_render_mermaid_diagrams {
                 extract_mermaid_diagrams(&source, &events)
+            } else {
+                BTreeMap::default()
+            };
+            let d2_diagrams = if should_render_d2_diagrams {
+                extract_d2_diagrams(&source, &events)
             } else {
                 BTreeMap::default()
             };
@@ -1302,6 +1377,7 @@ impl Markdown {
                     html_blocks,
                     metadata_blocks,
                     mermaid_diagrams,
+                    d2_diagrams,
                     heading_slugs,
                     footnote_definitions,
                 },
@@ -1337,6 +1413,15 @@ impl Markdown {
                 } else {
                     this.mermaid_state.clear(cx);
                     this.mermaid_views.clear();
+                }
+                if this.options.render_d2_diagrams {
+                    let parsed_markdown = this.parsed_markdown.clone();
+                    this.d2_views
+                        .retain(|offset, _| parsed_markdown.d2_diagrams.contains_key(offset));
+                    this.d2_state.update(&parsed_markdown, cx);
+                } else {
+                    this.d2_state.clear(cx);
+                    this.d2_views.clear();
                 }
                 this.pending_parse.take();
                 if this.should_reparse {
@@ -1448,6 +1533,7 @@ pub struct ParsedMarkdown {
     pub(crate) html_blocks: BTreeMap<usize, html::html_parser::ParsedHtmlBlock>,
     pub(crate) metadata_blocks: BTreeMap<usize, ParsedMetadataBlock>,
     pub(crate) mermaid_diagrams: BTreeMap<usize, ParsedMarkdownMermaidDiagram>,
+    pub(crate) d2_diagrams: BTreeMap<usize, ParsedMarkdownD2Diagram>,
     pub heading_slugs: HashMap<SharedString, usize>,
     pub footnote_definitions: HashMap<SharedString, usize>,
 }
@@ -2412,7 +2498,15 @@ impl Element for MarkdownElement {
             self.style.base_text_style.clone(),
             self.style.syntax.clone(),
         );
-        let (parsed_markdown, images, active_root_block, render_mermaid_diagrams, mermaid_state) = {
+        let (
+            parsed_markdown,
+            images,
+            active_root_block,
+            render_mermaid_diagrams,
+            mermaid_state,
+            render_d2_diagrams,
+            d2_state,
+        ) = {
             let markdown = self.markdown.read(cx);
             (
                 markdown.parsed_markdown.clone(),
@@ -2420,6 +2514,8 @@ impl Element for MarkdownElement {
                 markdown.active_root_block,
                 markdown.options.render_mermaid_diagrams,
                 markdown.mermaid_state.clone(),
+                markdown.options.render_d2_diagrams,
+                markdown.d2_state.clone(),
             )
         };
         let markdown_end = if let Some(last) = parsed_markdown.events.last() {
@@ -2429,9 +2525,17 @@ impl Element for MarkdownElement {
         };
         let mut code_block_ids = HashSet::default();
 
+        let diagram_copy_button_visibility = match &self.code_block_renderer {
+            CodeBlockRenderer::Default {
+                copy_button_visibility,
+                ..
+            } => *copy_button_visibility,
+            _ => CopyButtonVisibility::VisibleOnHover,
+        };
+
         let mut current_img_block_range: Option<Range<usize>> = None;
         let mut handled_html_block = false;
-        let mut rendered_mermaid_block = false;
+        let mut rendered_diagram_block = false;
         let mut rendered_metadata_block = false;
         for (index, (range, event)) in parsed_markdown.events.iter().enumerate() {
             // Skip alt text for images that rendered
@@ -2449,9 +2553,9 @@ impl Element for MarkdownElement {
                 }
             }
 
-            if rendered_mermaid_block {
+            if rendered_diagram_block {
                 if matches!(event, MarkdownEvent::End(MarkdownTagEnd::CodeBlock)) {
-                    rendered_mermaid_block = false;
+                    rendered_diagram_block = false;
                 }
                 continue;
             }
@@ -2558,13 +2662,6 @@ impl Element for MarkdownElement {
                                             markdown.effective_mermaid_zoom_level(range.start, cx),
                                         )
                                     });
-                                let copy_button_visibility = match &self.code_block_renderer {
-                                    CodeBlockRenderer::Default {
-                                        copy_button_visibility,
-                                        ..
-                                    } => *copy_button_visibility,
-                                    _ => CopyButtonVisibility::VisibleOnHover,
-                                };
                                 builder.push_sourced_element(
                                     mermaid_diagram.content_range.clone(),
                                     render_mermaid_diagram(
@@ -2575,13 +2672,36 @@ impl Element for MarkdownElement {
                                         range.start,
                                         showing_code,
                                         zoom,
-                                        copy_button_visibility,
+                                        diagram_copy_button_visibility,
                                         self.on_mermaid_zoom.clone(),
                                         window,
                                         cx,
                                     ),
                                 );
-                                rendered_mermaid_block = true;
+                                rendered_diagram_block = true;
+                                continue;
+                            }
+
+                            if render_d2_diagrams
+                                && d2_state.is_available()
+                                && let Some(d2_diagram) =
+                                    parsed_markdown.d2_diagrams.get(&range.start)
+                            {
+                                let showing_code =
+                                    self.markdown.read(cx).is_d2_showing_code(range.start);
+                                builder.push_sourced_element(
+                                    d2_diagram.content_range.clone(),
+                                    render_d2_diagram(
+                                        d2_diagram,
+                                        &d2_state,
+                                        &self.style,
+                                        self.markdown.clone(),
+                                        range.start,
+                                        showing_code,
+                                        diagram_copy_button_visibility,
+                                    ),
+                                );
+                                rendered_diagram_block = true;
                                 continue;
                             }
 
